@@ -9,12 +9,42 @@ Cách chạy:
     python weather_function_calling.py
 """
 
-from google import genai
-from google.genai import types
+import sys
 
-client = genai.Client()
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
-MODEL = "gemini-2.5-flash"
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+import json
+import os
+
+USE_DEEPSEEK = bool(
+    os.getenv("DEEPSEEK_API_KEY")
+    and os.getenv("DEEPSEEK_API_KEY") != "your_deepseek_api_key_here"
+)
+
+if USE_DEEPSEEK:
+    from openai import OpenAI
+    openai_client = OpenAI(
+        api_key=os.getenv("DEEPSEEK_API_KEY"),
+        base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+    )
+    MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+    print(f"🧠 Đang sử dụng model: DeepSeek ({MODEL})")
+else:
+    from google import genai
+    from google.genai import types
+    client = genai.Client()
+    MODEL = "gemini-2.5-flash"
+    print(f"🧠 Đang sử dụng model: Google Gemini ({MODEL})")
 
 SYSTEM_INSTRUCTION = (
     "Bạn là trợ lý thời tiết thân thiện, trả lời bằng tiếng Việt tự nhiên. "
@@ -23,22 +53,42 @@ SYSTEM_INSTRUCTION = (
     "(ví dụ: mang ô, mặc áo mỏng, ...)."
 )
 
-# 1. App tự định nghĩa schema của tool
-get_weather_declaration = types.FunctionDeclaration(
-    name="get_weather",
-    description="Lấy thời tiết hiện tại của một thành phố",
-    parameters=types.Schema(
-        type=types.Type.OBJECT,
-        properties={
-            "city": types.Schema(
-                type=types.Type.STRING, description="Tên thành phố"
-            )
-        },
-        required=["city"],
-    ),
-)
-
-TOOLS = [types.Tool(function_declarations=[get_weather_declaration])]
+# 1. Định nghĩa schema tool cho từng model
+if USE_DEEPSEEK:
+    TOOLS = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Lấy thời tiết hiện tại của một thành phố",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {
+                            "type": "string",
+                            "description": "Tên thành phố (ví dụ: Hà Nội, Hồ Chí Minh, Đà Nẵng)",
+                        }
+                    },
+                    "required": ["city"],
+                },
+            },
+        }
+    ]
+else:
+    get_weather_declaration = types.FunctionDeclaration(
+        name="get_weather",
+        description="Lấy thời tiết hiện tại của một thành phố",
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "city": types.Schema(
+                    type=types.Type.STRING, description="Tên thành phố"
+                )
+            },
+            required=["city"],
+        ),
+    )
+    TOOLS = [types.Tool(function_declarations=[get_weather_declaration])]
 
 
 # 2. App tự thực thi tool (trong thực tế sẽ gọi API thời tiết thật)
@@ -64,46 +114,54 @@ def get_weather(city: str) -> str:
             "gió": {"hướng": "Đông", "tốc_độ": "10 km/h"},
         },
     }
-    import json
-
     default = {"nhiệt_độ": "28°C", "thời_tiết": "không có dữ liệu chi tiết"}
     return json.dumps({"city": city, **mock_data.get(city, default)}, ensure_ascii=False)
 
 
 def run(prompt: str) -> str:
-    """Gửi *prompt* tới Gemini, tự động xử lý function calling và trả về câu trả lời cuối."""
-    contents: list[types.Content] = [
-        types.Content(role="user", parts=[types.Part.from_text(text=prompt)])
-    ]
-
-    # 3. Gọi model — model quyết định có gọi tool hay không
-    resp = client.models.generate_content(
-        model=MODEL,
-        contents=contents,
-        config=types.GenerateContentConfig(
+    """Gửi prompt tới LLM (DeepSeek hoặc Gemini), tự động xử lý function calling và trả lời."""
+    if USE_DEEPSEEK:
+        messages = [
+            {"role": "system", "content": SYSTEM_INSTRUCTION},
+            {"role": "user", "content": prompt},
+        ]
+        resp = openai_client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
             tools=TOOLS,
-            system_instruction=SYSTEM_INSTRUCTION,
-        ),
-    )
-
-    # 4. Vòng lặp: nếu model yêu cầu tool, app TỰ THỰC THI rồi đưa kết quả trả lại
-    while resp.function_calls:
-        # Thêm phản hồi của model vào lịch sử hội thoại
-        contents.append(resp.candidates[0].content)
-
-        function_responses = []
-        for fc in resp.function_calls:
-            print(f"  [model yêu cầu] {fc.name}({fc.args})")
-            result = get_weather(**fc.args)  # <-- app chạy, không phải model
-            print(f"  [app thực thi]  -> {result}")
-            function_responses.append(
-                types.Part.from_function_response(
-                    name=fc.name, response={"result": result}
+            tool_choice="auto",
+        )
+        msg = resp.choices[0].message
+        while msg.tool_calls:
+            messages.append(msg)
+            for tc in msg.tool_calls:
+                fn_name = tc.function.name
+                fn_args = json.loads(tc.function.arguments or "{}")
+                print(f"  [model yêu cầu] {fn_name}({fn_args})")
+                if fn_name == "get_weather":
+                    result = get_weather(**fn_args)
+                else:
+                    result = json.dumps({"error": f"Tool {fn_name} not found"})
+                print(f"  [app thực thi]  -> {result}")
+                messages.append(
+                    {
+                        "tool_call_id": tc.id,
+                        "role": "tool",
+                        "name": fn_name,
+                        "content": result,
+                    }
                 )
+            resp = openai_client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                tools=TOOLS,
             )
-
-        # Gửi kết quả tool trả về cho model
-        contents.append(types.Content(role="user", parts=function_responses))
+            msg = resp.choices[0].message
+        return msg.content or ""
+    else:
+        contents: list[types.Content] = [
+            types.Content(role="user", parts=[types.Part.from_text(text=prompt)])
+        ]
         resp = client.models.generate_content(
             model=MODEL,
             contents=contents,
@@ -112,9 +170,29 @@ def run(prompt: str) -> str:
                 system_instruction=SYSTEM_INSTRUCTION,
             ),
         )
-
-    # 5. Model tổng hợp câu trả lời cuối
-    return resp.text
+        while resp.function_calls:
+            contents.append(resp.candidates[0].content)
+            function_responses = []
+            for fc in resp.function_calls:
+                print(f"  [model yêu cầu] {fc.name}({fc.args})")
+                args = fc.args or {}
+                result = get_weather(**args)
+                print(f"  [app thực thi]  -> {result}")
+                function_responses.append(
+                    types.Part.from_function_response(
+                        name=fc.name, response={"result": result}
+                    )
+                )
+            contents.append(types.Content(role="user", parts=function_responses))
+            resp = client.models.generate_content(
+                model=MODEL,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    tools=TOOLS,
+                    system_instruction=SYSTEM_INSTRUCTION,
+                ),
+            )
+        return resp.text
 
 
 if __name__ == "__main__":

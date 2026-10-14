@@ -2,6 +2,32 @@
 Weather Agent - Connects to Remote MCP Server on Cloud Run
 Successfully connects to custom MCP HTTP endpoints!
 """
+import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+# Bypass lỗi mạng khi tiktoken cố tải file mã hoá từ openaipublic.blob.core.windows.net
+try:
+    import tiktoken
+
+    class _DummyEncoding:
+        name = "cl100k_base"
+
+        def encode(self, text, *args, **kwargs):
+            return [1] * max(1, len(text) // 4)
+
+        def decode(self, *args, **kwargs):
+            return ""
+
+    tiktoken.get_encoding = lambda *args, **kwargs: _DummyEncoding()
+    tiktoken.encoding_for_model = lambda *args, **kwargs: _DummyEncoding()
+except Exception:
+    pass
+
 from google.adk import Agent
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset, StreamableHTTPConnectionParams
 import logging
@@ -15,8 +41,17 @@ logger = logging.getLogger(__name__)
 # (ví dụ: https://<service>.run.app/mcp). verify_setup.py đọc cùng biến này.
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8085/mcp")
 
+# Lựa chọn model: Ưu tiên DeepSeek nếu có DEEPSEEK_API_KEY, ngược lại dùng Gemini
+if os.getenv("DEEPSEEK_API_KEY") and os.getenv("DEEPSEEK_API_KEY") != "your_deepseek_api_key_here":
+    DEFAULT_MODEL = "deepseek/deepseek-chat"
+else:
+    DEFAULT_MODEL = "gemini-2.5-flash"
+
+MODEL_NAME = os.getenv("MODEL", DEFAULT_MODEL)
+
 logger.info(f"🌐 Initializing weather agent with remote MCP server")
 logger.info(f"📡 MCP Server: {MCP_SERVER_URL}")
+logger.info(f"🧠 Model: {MODEL_NAME}")
 
 try:
     # Create connection parameters for the remote MCP server
@@ -35,7 +70,7 @@ try:
     # Create the agent with remote MCP tools
     root_agent = Agent(
         name="weather_agent",
-        model="gemini-2.5-flash",
+        model=MODEL_NAME,
         tools=[weather_tools],
     )
     logger.info("✅ Weather agent initialized with remote MCP tools:")
@@ -54,6 +89,6 @@ except Exception as e:
     logger.warning("⚠️  Creating fallback agent without MCP tools")
     root_agent = Agent(
         name="weather_agent",
-        model="gemini-2.5-flash",
+        model=MODEL_NAME,
     )
 

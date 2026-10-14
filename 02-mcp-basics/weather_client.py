@@ -14,15 +14,22 @@ Cách chạy (cùng thư mục với weather_server.py, client tự khởi độ
 """
 
 import asyncio
+import os
 import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
 async def main() -> None:
-    # Dùng đúng interpreter đang chạy client (tránh lỗi "python" không tồn tại)
-    params = StdioServerParameters(command=sys.executable, args=["weather_server.py"])
+    server_script = os.path.join(os.path.dirname(__file__), "weather_server.py")
+    params = StdioServerParameters(command=sys.executable, args=[server_script])
 
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
